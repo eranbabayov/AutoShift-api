@@ -4,7 +4,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm import Session
 
 from database.models import Employee, Company, Role
-from exception import NotFoundException, DatabaseException
+from exception import NotFoundException, DatabaseException, FailedToCreateNewRole
 from logger import get_logger
 from dotenv import load_dotenv
 
@@ -65,22 +65,24 @@ def add_company(db: Session, company: CompanySchema):
         db.refresh(db_company)
         return db_company
     except Exception as e:
-        logger.exception(f"Failed to add new company. exception: {e}")
-        raise DatabaseException()
+        msg = f"Failed to add new company. exception: {e}"
+        logger.exception(msg)
+        raise DatabaseException(msg)
 
 
 def add_role(db: Session, role_name: str):
     try:
         existing_role = db.query(Role).filter_by(role_name=role_name).first()
         if existing_role:
-            raise DatabaseException(f"Role with name '{role_name}' already exists.")
+            raise FailedToCreateNewRole(detail=f"Role with name '{role_name}' already exists.")
 
         role = Role(role_name=role_name)
         db.add(role)
         db.commit()
         db.refresh(role)
         return role
-
+    except FailedToCreateNewRole as ex:
+        raise ex
     except Exception as e:
         logger.exception(f"Failed to add new role. exception: {e}")
         raise DatabaseException()

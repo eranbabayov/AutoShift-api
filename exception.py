@@ -23,6 +23,11 @@ class FailedToCreateEmployee(HTTPException):
         super().__init__(status_code=status.HTTP_200_OK, detail=detail)
 
 
+class FailedToCreateNewRole(HTTPException):
+    def __init__(self, detail: str = "Failed to create new role"):
+        super().__init__(status_code=status.HTTP_200_OK, detail=detail)
+
+
 class DatabaseException(HTTPException):
     def __init__(self, detail: str = "failed to perform database operation"):
         super().__init__(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
