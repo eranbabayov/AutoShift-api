@@ -2,7 +2,7 @@ import logging
 import sys
 
 
-def get_logger(name: str = "shiftwise"):
+def get_logger(name: str = "autoshift"):
     logger = logging.getLogger(name)
 
     if not logger.handlers:  # Prevent duplicate handlers if called multiple times

@@ -17,6 +17,11 @@ class UnauthorizedException(HTTPException):
         super().__init__(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)
 
 
+class AlreadyExists(HTTPException):
+    def __init__(self, detail: str = "This type of data already exists in the db"):
+        super().__init__(status_code=status.HTTP_200_OK, detail=detail)
+
+
 # Unauthorized access
 class FailedToCreateEmployee(HTTPException):
     def __init__(self, detail: str = "Failed to create new employee"):
