@@ -314,9 +314,7 @@ def run_scheduler_for_company(db: Session, company_id: int) -> dict:
     try:
         # 1. Load company-specific data
         employees = db.query(Employee).filter(Employee.company_id == company_id).all()
-        shifts = db.query(ShiftTypes).with_entities(
-                ShiftTypes.type_name
-            ).all()
+        shifts = db.query(ShiftTypes).order_by(ShiftTypes.id).with_entities(ShiftTypes.type_name).all()
 
         shifts_data = [s[0] for s in shifts]
 
@@ -388,12 +386,6 @@ def my_scheduler(
     HORIZON_DAYS = calendar.monthrange(YEAR, MONTH)[1]
     num_days = HORIZON_DAYS
     num_shifts = len(shifts)
-    print("@#@###############")
-    print(shifts)
-    shifts = ["O", "N"]
-    print(num_shifts)
-    # num_shifts=1
-    # print(num_shifts)
     start_sat_index = sat_index_from_pyweekday(START_DATE.weekday())
 
     # Demand template per weekday (Sat..Fri). For ["O","N"], each entry is a 1-tuple.
