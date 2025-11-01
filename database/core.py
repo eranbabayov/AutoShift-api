@@ -390,6 +390,7 @@ def my_scheduler(
     num_shifts = len(shifts)
     print("@#@###############")
     print(shifts)
+    shifts = ["O", "N"]
     print(num_shifts)
     # num_shifts=1
     # print(num_shifts)

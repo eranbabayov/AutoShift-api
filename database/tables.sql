@@ -7,8 +7,7 @@ CREATE TABLE shift_request (
     id INT AUTO_INCREMENT PRIMARY KEY,
     employee_id INT NOT NULL,
     shift_type_id INT NOT NULL,
-    shift_date DATE NOT NULL,
-    desired ENUM('yes', 'no', 'prefer_not') NOT NULL,
+    shift_date INT NOT NULL,
     weight INT NOT NULL,
     FOREIGN KEY (employee_id) REFERENCES employee(id) ON DELETE CASCADE,
     FOREIGN KEY (shift_type_id) REFERENCES shift_types(id) ON DELETE CASCADE
