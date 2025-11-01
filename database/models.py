@@ -86,8 +86,7 @@ class ShiftRequest(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     employee_id = Column(Integer, ForeignKey("employee.id", ondelete="CASCADE"), nullable=False)
     shift_type_id = Column(Integer, ForeignKey("shift_types.id", ondelete="CASCADE"), nullable=False)
-    shift_date = Column(Date, nullable=False)
-    desired = Column(Enum(DesiredOption), nullable=False)
+    shift_date = Column(Integer, nullable=False)
     weight = Column(Integer, nullable=False)
 
     employee = relationship("Employee", back_populates="shift_requests")

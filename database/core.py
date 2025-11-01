@@ -1,10 +1,11 @@
 import os
-from datetime import timedelta, date, datetime
 from typing import List, Any
 
-from ortools.sat.python import cp_model
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
+from ortools.sat.python import cp_model
+from datetime import date, timedelta
+import calendar
 
 from algo_example import add_soft_sum_constraint
 from database.models import (
@@ -313,11 +314,22 @@ def run_scheduler_for_company(db: Session, company_id: int) -> dict:
     try:
         # 1. Load company-specific data
         employees = db.query(Employee).filter(Employee.company_id == company_id).all()
-        shifts = db.query(ShiftTypes).all()
-        shift_requests = (
+        shifts = db.query(ShiftTypes).with_entities(
+                ShiftTypes.type_name
+            ).all()
+
+        shifts_data = [s[0] for s in shifts]
+
+        shift_requests_data = (
             db.query(ShiftRequest)
             .join(Employee)
             .filter(Employee.company_id == company_id)
+            .with_entities(
+                ShiftRequest.employee_id,
+                ShiftRequest.shift_type_id,
+                ShiftRequest.shift_date,
+                ShiftRequest.weight
+            )
             .all()
         )
         weekly_demands = db.query(WeeklyCoverDemands).all()
@@ -331,8 +343,6 @@ def run_scheduler_for_company(db: Session, company_id: int) -> dict:
 
         # 2. Convert ORM objects to dicts for the algorithm
         employees_data = [e.__dict__ for e in employees]
-        shift_requests_data = [s.__dict__ for s in shift_requests]
-        shifts_data = [s.__dict__ for s in shifts]
         weekly_demands_data = [d.__dict__ for d in weekly_demands]
         penalties_data = [p.__dict__ for p in penalties]
         constraints_data = [c.__dict__ for c in constraints]
@@ -351,7 +361,6 @@ def run_scheduler_for_company(db: Session, company_id: int) -> dict:
 
     except Exception as e:
         raise DatabaseException(detail=f"Failed to run scheduler: {e}")
-
 
 def my_scheduler(
     employees: list,
@@ -372,14 +381,230 @@ def my_scheduler(
         ...
     }
     """
-    schedule = {}
-    for emp in employees:
-        emp_id = emp['id']
-        schedule[emp_id] = {}
-        if shifts:
-            # Example: assign first shift to first date
-            schedule[emp_id]['2025-09-01'] = shifts[0]['type_name']
-    return schedule
+    num_employees = len(employees)
+    YEAR = 2025
+    MONTH = 11
+    START_DATE = date(YEAR, MONTH, 1)
+    HORIZON_DAYS = calendar.monthrange(YEAR, MONTH)[1]
+    num_days = HORIZON_DAYS
+    num_shifts = len(shifts)
+    print("@#@###############")
+    print(shifts)
+    print(num_shifts)
+    # num_shifts=1
+    # print(num_shifts)
+    start_sat_index = sat_index_from_pyweekday(START_DATE.weekday())
+
+    # Demand template per weekday (Sat..Fri). For ["O","N"], each entry is a 1-tuple.
+    weekday_demand_template = [
+        (1,),  # Sat
+        (1,),  # Sun
+        (1,),  # Mon
+        (1,),  # Tue
+        (1,),  # Wed
+        (1,),  # Thu
+        (1,),  # Fri
+    ]
+
+    # ---------------------------------------------------------------------
+    # Model
+    # ---------------------------------------------------------------------
+    shortage_penalty = 10  # tune as needed
+
+    # Fixed assignments: (employee, shift, day).
+    fixed_assignments = []
+
+    # Requests: (employee, shift, day, weight); negative weight = employee wants it.
+
+    print("@!!~!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+    print(shift_requests)
+    print("@!!~!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+    model = cp_model.CpModel()
+    # Decision vars
+    work = {}
+    for e in range(num_employees):
+        for s in range(num_shifts):
+            for d in range(num_days):
+                work[e, s, d] = model.new_bool_var(f"work{e}_{s}_{d}")
+    # Objective accumulators
+    obj_int_vars: list[cp_model.IntVar] = []
+    obj_int_coeffs: list[int] = []
+    obj_bool_vars: list[cp_model.BoolVarT] = []
+    obj_bool_coeffs: list[int] = []
+
+    # Exactly one shift per (employee, day)
+    for e in range(num_employees):
+        for d in range(num_days):
+            model.add_exactly_one(work[e, s, d] for s in range(num_shifts))
+
+    # Fixed assignments
+    for e, s, d in fixed_assignments:
+        model.add(work[e, s, d] == 1)
+
+    # Employee shift_requests feed the objective (negative = gain)
+    for e, s, d, w in shift_requests:
+        if 0 <= e < num_employees and 0 < s < num_shifts and 0 <= d < num_days:
+            obj_bool_vars.append(work[e, s, d])
+            obj_bool_coeffs.append(w)
+
+    # ELIGIBILITY: only requested/fixed working shifts; else force Off
+    allowed_work = set()
+    for e, s, d in fixed_assignments:
+        if s > 0 and 0 <= d < num_days and 0 <= e < num_employees:
+            allowed_work.add((e, s, d))
+    for e, s, d, w in shift_requests:
+        if s > 0 and w < 0 and 0 <= d < num_days and 0 <= e < num_employees:
+            allowed_work.add((e, s, d))
+    for e in range(num_employees):
+        for d in range(num_days):
+            for s in range(1, num_shifts):  # working shifts only
+                if (e, s, d) not in allowed_work:
+                    model.add(work[e, s, d] == 0)
+
+
+    # Soft coverage (per absolute day)
+    shortage_vars = {}  # (s, d) -> IntVar
+    for s in range(1, num_shifts):  # ignore Off=0
+        for d in range(num_days):
+            demand = demand_for_day_and_shift(
+                weekday_demand_template, start_sat_index, d, s
+            )
+            works_sd = [work[e, s, d] for e in range(num_employees)]
+            shortage = model.new_int_var(0, demand, f"shortage_s{s}_d{d}")
+            model.add(sum(works_sd) + shortage == demand)
+            if shortage_penalty > 0:
+                obj_int_vars.append(shortage)
+                obj_int_coeffs.append(shortage_penalty)
+            shortage_vars[(s, d)] = shortage
+
+
+    # --- Fair-share on NIGHT workload ---
+    totals_N: list[cp_model.IntVar] = []
+    shift_len = len(shifts)
+    for e in range(num_employees):
+        t = model.new_int_var(0, num_days, f"total_N_e{e}")
+        model.add(t == sum(work[e, shift_len-1, d] for d in range(num_days)))
+        totals_N.append(t)
+
+    # Keep the weight small so it nudges but doesn't dominate feasibility.
+    FAIRNESS_COST = 1  # try 1–5
+    vars_fair, coeffs_fair = add_fair_share(
+        model,
+        totals_per_employee=totals_N,
+        fairness_cost=FAIRNESS_COST,
+        prefix="fair_N",
+        max_total=num_days,
+    )
+    obj_int_vars.extend(vars_fair)
+    obj_int_coeffs.extend(coeffs_fair)
+
+    # Objective
+    model.minimize(
+        sum(obj_bool_vars[i] * obj_bool_coeffs[i] for i in range(len(obj_bool_vars)))
+        + sum(obj_int_vars[i] * obj_int_coeffs[i] for i in range(len(obj_int_vars)))
+    )
+
+    # Solve
+    solver = cp_model.CpSolver()
+    # If desired: solver.parameters.parse_text_format(params)
+    solution_printer = cp_model.ObjectiveSolutionPrinter()
+    status = solver.solve(model, solution_printer)
+
+    # Print solution
+    if status == cp_model.OPTIMAL or status == cp_model.FEASIBLE:
+        print()
+        # Header with actual dates
+        print("          " + " ".join(build_date_labels(START_DATE, num_days)))
+        for e in range(num_employees):
+            schedule = ""
+            for d in range(num_days):
+                for s in range(num_shifts):
+                    if solver.boolean_value(work[e, s, d]):
+                        schedule += shifts[s] + " "
+            print(f"worker {e}: {schedule}")
+        print()
+        print("Penalties:")
+        for i, var in enumerate(obj_bool_vars):
+            if solver.boolean_value(var):
+                penalty = obj_bool_coeffs[i]
+                if penalty > 0:
+                    print(f"  {var.name} violated, penalty={penalty}")
+                else:
+                    print(f"  {var.name} fulfilled, gain={-penalty}")
+        for i, var in enumerate(obj_int_vars):
+            if solver.value(var) > 0:
+                print(f"  {var.name} violated by {solver.value(var)}, linear penalty={obj_int_coeffs[i]}")
+
+        # Coverage gap report with dates
+        print("\nCoverage gaps (people missing):")
+        any_gap = False
+        dl = build_date_labels(START_DATE, num_days)
+        for (s, d), var in shortage_vars.items():
+            gap = solver.value(var)
+            if gap > 0:
+                any_gap = True
+                print(f"  {dl[d]} | shift {shifts[s]}: missing {gap}")
+        if not any_gap:
+            print("  None")
+
+    print()
+    print(solver.response_stats())
+    return solver.response_stats()
+
+def demand_for_day_and_shift(
+    weekday_demand_template: list[tuple[int, ...]],
+    start_sat_index: int,
+    d: int,
+    s: int,
+) -> int:
+    """
+    Demand for absolute day d and working shift s (s>=1).
+    weekday_demand_template is ordered Sat..Fri (length 7).
+    """
+    sat_idx = (start_sat_index + d) % 7
+    return weekday_demand_template[sat_idx][s - 1]
+
+
+def build_date_labels(start: date, num_days: int) -> list[str]:
+    """Return compact labels like 'Sat 01-Nov' for the horizon."""
+    return [(start + timedelta(days=d)).strftime("%a %d-%b") for d in range(num_days)]
+
+def add_fair_share(
+    model: cp_model.CpModel,
+    totals_per_employee: list[cp_model.IntVar],
+    *,
+    fairness_cost: int,
+    prefix: str,
+    max_total: int,
+) -> tuple[list[cp_model.IntVar], list[int]]:
+    """Penalize |total_e - avg| to balance workload across employees.
+
+    We minimize sum_e |n * total_e - sum_totals|, which is equivalent to
+    minimizing the deviation from the (fractional) average without division.
+    """
+    n = len(totals_per_employee)
+
+    sum_totals = model.new_int_var(0, n * max_total, f"{prefix}:sum")
+    model.add(sum_totals == sum(totals_per_employee))
+
+    cost_vars: list[cp_model.IntVar] = []
+    cost_coeffs: list[int] = []
+
+    for idx, t in enumerate(totals_per_employee):
+        # dev_e = | n * t - sum_totals |
+        tmp = model.new_int_var(-n * max_total, n * max_total, f"{prefix}:tmp_e{idx}")
+        model.add(tmp == n * t - sum_totals)
+        dev = model.new_int_var(0, n * max_total, f"{prefix}:dev_e{idx}")
+        model.add_abs_equality(dev, tmp)
+        cost_vars.append(dev)
+        cost_coeffs.append(fairness_cost)
+
+    return cost_vars, cost_coeffs
+
+def sat_index_from_pyweekday(py_w: int) -> int:
+    """Map Python weekday Mon..Sun=0..6 to Sat..Fri=0..6 indexing."""
+    return (py_w + 2) % 7
+
 
 def add_soft_sequence_constraint(model, work_vars, max_length, penalty, penalty_var):
     """
