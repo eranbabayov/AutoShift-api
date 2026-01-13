@@ -36,3 +36,8 @@ class FailedToCreateNewRole(HTTPException):
 class DatabaseException(HTTPException):
     def __init__(self, detail: str = "failed to perform database operation"):
         super().__init__(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+
+
+class InvalidCredentials(HTTPException):
+    def __init__(self, detail: str = "Invalid credentials"):
+        super().__init__(status_code=status.HTTP_401_UNAUTHORIZED, detail=detail)

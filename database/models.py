@@ -86,7 +86,7 @@ class ShiftRequest(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     employee_id = Column(Integer, ForeignKey("employee.id", ondelete="CASCADE"), nullable=False)
     shift_type_id = Column(Integer, ForeignKey("shift_types.id", ondelete="CASCADE"), nullable=False)
-    shift_date = Column(Integer, nullable=False)
+    shift_date = Column(Date, nullable=False)
     weight = Column(Integer, nullable=False)
 
     employee = relationship("Employee", back_populates="shift_requests")
@@ -120,3 +120,10 @@ class PenalizedTransitions(Base):
 
     from_shift = relationship("ShiftTypes", foreign_keys=[from_shift_id])
     to_shift = relationship("ShiftTypes", foreign_keys=[to_shift_id])
+
+
+class User(Base):
+    __tablename__ = 'users'
+    email = Column(String, primary_key=True, unique=True, index=True)
+    password = Column(String, nullable=False)
+    company_id = Column(Integer, nullable=False)

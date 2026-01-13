@@ -17,7 +17,6 @@ class AddShiftRequest(BaseModel):
     employee_id: int
     shift_type_id: int
     shift_date: date
-    desired: DesiredOption
     weight: int
 
 
@@ -60,3 +59,16 @@ class OptionalEmployeeConstraintSchema(BaseModel):
 class ActualEmployeeConstraintSchema(BaseModel):
     constraint_id: int
     employee_id: int
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class RegistrationRequest(BaseModel):
+    name: str
+    email: str
+    phone: str
+    companyName: str
+    numberOfEmployees: str

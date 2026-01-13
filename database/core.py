@@ -16,7 +16,7 @@ from database.models import (
     ShiftConstraint,
     OptionalEmployeeConstraint,
     ActualEmployeeConstraint,
-    ShiftRequest, WeeklyCoverDemands, PenalizedTransitions,
+    ShiftRequest, WeeklyCoverDemands, PenalizedTransitions, User,
 )
 from exception import NotFoundException, DatabaseException, FailedToCreateNewRole, AlreadyExists
 from logger import get_logger
@@ -29,7 +29,7 @@ from schema import (
     ShiftConstraintSchema,
     OptionalEmployeeConstraintSchema,
     ActualEmployeeConstraintSchema,
-    AddShiftRequest, WeeklyCoverDemandSchema,
+    AddShiftRequest, WeeklyCoverDemandSchema, LoginRequest,
 )
 
 load_dotenv()
@@ -127,6 +127,18 @@ def delete_employee_using_id(db: Session, employee_id: int) -> None:
         employee = db.query(Employee).filter(Employee.id == employee_id).first()
         if not employee:
             raise NotFoundException(detail=f"Employee id {employee_id} not found")
+
+        # Delete related ActualEmployeeConstraint rows
+        db.query(ActualEmployeeConstraint).filter(
+            ActualEmployeeConstraint.employee_id == employee_id
+        ).delete(synchronize_session=False)
+
+        # Delete related ShiftRequest rows
+        db.query(ShiftRequest).filter(
+            ShiftRequest.employee_id == employee_id
+        ).delete(synchronize_session=False)
+
+        # Now delete the employee
         db.delete(employee)
         db.commit()
     except NotFoundException:
@@ -269,6 +281,15 @@ def add_actual_employee_constraint(db: Session, employee_constraint: ActualEmplo
         raise DatabaseException()
 
 
+def login_request(db: Session, credentials: LoginRequest):
+
+    return db.query(User).filter(
+        User.email == credentials.email,
+        User.password == credentials.password
+    ).first()
+
+
+
 # ---------------
 # Shift requests
 # ---------------
@@ -312,11 +333,28 @@ def run_scheduler_for_company(db: Session, company_id: int) -> dict:
     Loads all data for a specific company and runs the scheduler.
     """
     try:
-        # 1. Load company-specific data
-        employees = db.query(Employee).filter(Employee.company_id == company_id).all()
-        shifts = db.query(ShiftTypes).order_by(ShiftTypes.id).with_entities(ShiftTypes.type_name).all()
+        # 1. Load employees for this company, ordered by DB id so the index is stable.
+        employees = (
+            db.query(Employee)
+            .filter(Employee.company_id == company_id)
+            .order_by(Employee.id)
+            .all()
+        )
+        # 2. Load shift types, ordered by DB id.
+        shift_types = (
+            db.query(ShiftTypes)
+            .order_by(ShiftTypes.id)
+            .all()
+        )
 
-        shifts_data = [s[0] for s in shifts]
+        #shifts_data = ["O"] + [st.type_name for st in shift_types] todo: set it from db later
+        shifts_data = ["O", "N"]
+
+        # Map DB shift_type.id → model shift index (1..num_shifts-1).
+        #shift_id_to_idx = {st.id: idx + 1 for idx, st in enumerate(shift_types)}
+        # Map *all* DB shift types to the single working shift index 1
+
+        shift_id_to_idx = {st.id: 1 for st in shift_types}
 
         shift_requests_data = (
             db.query(ShiftRequest)
@@ -339,20 +377,39 @@ def run_scheduler_for_company(db: Session, company_id: int) -> dict:
             .all()
         )
 
-        # 2. Convert ORM objects to dicts for the algorithm
+        # 3. Convert ORM objects to plain dicts for the scheduler.
         employees_data = [e.__dict__ for e in employees]
         weekly_demands_data = [d.__dict__ for d in weekly_demands]
         penalties_data = [p.__dict__ for p in penalties]
         constraints_data = [c.__dict__ for c in constraints]
 
-        # 3. Run scheduling algorithm
+        # 4. Build a mapping from DB employee.id → model index 0..num_employees-1.
+        emp_id_to_idx = {e["id"]: idx for idx, e in enumerate(employees_data)}
+
+        # 5. Convert shift_requests from DB ids to model indices.
+        #    - employee_id → e_idx (0..num_employees-1)
+        #    - shift_type_id → s_idx (1..num_shifts-1; 0 is Off)
+
+        indexed_shift_requests = []
+        for emp_id, shift_type_id, shift_date, weight in shift_requests_data:
+            # Skip requests that refer to employees or shifts that are not in the model.
+            if emp_id not in emp_id_to_idx:
+                continue
+            if shift_type_id not in shift_id_to_idx:
+                continue
+
+            e_idx = emp_id_to_idx[emp_id]
+            s_idx = shift_id_to_idx[shift_type_id]
+            indexed_shift_requests.append((e_idx, s_idx, shift_date, weight))
+
+        # 6. Call the scheduling algorithm with indices, not raw DB ids.
         schedule = my_scheduler(
             employees=employees_data,
-            shift_requests=shift_requests_data,
+            shift_requests=indexed_shift_requests,
             shifts=shifts_data,
             weekly_demands=weekly_demands_data,
             penalties=penalties_data,
-            constraints=constraints_data
+            constraints=constraints_data,
         )
 
         return schedule
@@ -360,32 +417,34 @@ def run_scheduler_for_company(db: Session, company_id: int) -> dict:
     except Exception as e:
         raise DatabaseException(detail=f"Failed to run scheduler: {e}")
 
+def day_index(START_DATE, date_obj):
+    return (date_obj - START_DATE).days
+
 def my_scheduler(
     employees: list,
-    shift_requests: list,
-    shifts: list,
+    shift_requests: list,  # (employee_index, shift_index, date, weight)
+    shifts: list,  # ["O", "Morning", "Night", ...]
     weekly_demands: list,
     penalties: list,
-    constraints: list
+    constraints: list,
 ) -> dict:
     """
-    Example scheduler stub. Replace with real scheduling logic.
-    Returns a dictionary:
-    {
-        "employee_id": {
-            "2025-09-01": "Morning",
-            ...
-        },
-        ...
-    }
+    Scheduler stub using OR-Tools CP-SAT.
+    All employees and shift types are referred to by 0-based indices.
+    DB ids are NOT used inside this function.
     """
+    print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!1")
+    print(f"shift_requests: {shift_requests}")
+
     num_employees = len(employees)
+    num_shifts = len(shifts)
+
+    # num_employees = 11
     YEAR = 2025
     MONTH = 11
     START_DATE = date(YEAR, MONTH, 1)
     HORIZON_DAYS = calendar.monthrange(YEAR, MONTH)[1]
     num_days = HORIZON_DAYS
-    num_shifts = len(shifts)
     start_sat_index = sat_index_from_pyweekday(START_DATE.weekday())
 
     # Demand template per weekday (Sat..Fri). For ["O","N"], each entry is a 1-tuple.
@@ -409,11 +468,8 @@ def my_scheduler(
 
     # Requests: (employee, shift, day, weight); negative weight = employee wants it.
 
-    print("@!!~!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-    print(shift_requests)
-    print("@!!~!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
     model = cp_model.CpModel()
-    # Decision vars
+    # Decision variables: work[e, s, d] = 1 if employee e works shift s on day d.
     work = {}
     for e in range(num_employees):
         for s in range(num_shifts):
@@ -425,35 +481,47 @@ def my_scheduler(
     obj_bool_vars: list[cp_model.BoolVarT] = []
     obj_bool_coeffs: list[int] = []
 
-    # Exactly one shift per (employee, day)
+    # Exactly one shift per (employee, day) – including Off (index 0).
     for e in range(num_employees):
         for d in range(num_days):
             model.add_exactly_one(work[e, s, d] for s in range(num_shifts))
 
-    # Fixed assignments
+    # Fixed assignments: force particular (e, s, d) to 1.
     for e, s, d in fixed_assignments:
         model.add(work[e, s, d] == 1)
 
-    # Employee shift_requests feed the objective (negative = gain)
+    # Requests: add them to the objective (negative weight = preference / gain).
     for e, s, d, w in shift_requests:
-        if 0 <= e < num_employees and 0 < s < num_shifts and 0 <= d < num_days:
-            obj_bool_vars.append(work[e, s, d])
+        day_idx = day_index(START_DATE, d)
+        print("$$$$$$$$$$$$$$$$$$$$$$$$$$")
+        print(day_idx)
+        if 0 <= e < num_employees and 0 < s < num_shifts and 0 <= day_idx < num_days:
+            obj_bool_vars.append(work[e, s, day_idx])
             obj_bool_coeffs.append(w)
 
-    # ELIGIBILITY: only requested/fixed working shifts; else force Off
+    # Eligibility: only shifts that are fixed or requested (with negative weight)
+    # are allowed as working shifts; everything else must be Off.
     allowed_work = set()
+
+    # Fixed assignments are always allowed.
     for e, s, d in fixed_assignments:
-        if s > 0 and 0 <= d < num_days and 0 <= e < num_employees:
+        if s > 0 and 0 <= d < num_days:
             allowed_work.add((e, s, d))
+
+    # Requested working shifts with negative weight are allowed.
     for e, s, d, w in shift_requests:
-        if s > 0 and w < 0 and 0 <= d < num_days and 0 <= e < num_employees:
-            allowed_work.add((e, s, d))
+        day_idx = day_index(START_DATE, d)
+        if s > 0 and w < 0 and 0 <= day_idx < num_days:
+            allowed_work.add((e, s, day_idx))
+            print(f"adding: {e} {s} {day_idx} to allowed work")
+
+    # For every employee and day, all working shifts (s > 0) that are not in
+    # allowed_work are forced to 0, so the solver can only use Off or allowed shifts.
     for e in range(num_employees):
         for d in range(num_days):
             for s in range(1, num_shifts):  # working shifts only
                 if (e, s, d) not in allowed_work:
                     model.add(work[e, s, d] == 0)
-
 
     # Soft coverage (per absolute day)
     shortage_vars = {}  # (s, d) -> IntVar
@@ -463,23 +531,26 @@ def my_scheduler(
                 weekday_demand_template, start_sat_index, d, s
             )
             works_sd = [work[e, s, d] for e in range(num_employees)]
+            print(f"words ds : {works_sd}")
+
+            # shortage_s_d measures how many workers are missing for shift s on day d.
             shortage = model.new_int_var(0, demand, f"shortage_s{s}_d{d}")
             model.add(sum(works_sd) + shortage == demand)
+
             if shortage_penalty > 0:
                 obj_int_vars.append(shortage)
                 obj_int_coeffs.append(shortage_penalty)
+
             shortage_vars[(s, d)] = shortage
 
 
-    # --- Fair-share on NIGHT workload ---
+    # Fair-share on the last shift type (e.g. Night).
     totals_N: list[cp_model.IntVar] = []
-    shift_len = len(shifts)
     for e in range(num_employees):
         t = model.new_int_var(0, num_days, f"total_N_e{e}")
-        model.add(t == sum(work[e, shift_len-1, d] for d in range(num_days)))
+        model.add(t == sum(work[e, num_shifts - 1, d] for d in range(num_days)))
         totals_N.append(t)
 
-    # Keep the weight small so it nudges but doesn't dominate feasibility.
     FAIRNESS_COST = 1  # try 1–5
     vars_fair, coeffs_fair = add_fair_share(
         model,
@@ -497,9 +568,7 @@ def my_scheduler(
         + sum(obj_int_vars[i] * obj_int_coeffs[i] for i in range(len(obj_int_vars)))
     )
 
-    # Solve
     solver = cp_model.CpSolver()
-    # If desired: solver.parameters.parse_text_format(params)
     solution_printer = cp_model.ObjectiveSolutionPrinter()
     status = solver.solve(model, solution_printer)
 
@@ -509,12 +578,12 @@ def my_scheduler(
         # Header with actual dates
         print("          " + " ".join(build_date_labels(START_DATE, num_days)))
         for e in range(num_employees):
-            schedule = ""
+            line = ""
             for d in range(num_days):
                 for s in range(num_shifts):
                     if solver.boolean_value(work[e, s, d]):
-                        schedule += shifts[s] + " "
-            print(f"worker {e}: {schedule}")
+                        line += shifts[s] + " "
+            print(f"worker {e}: {line}")
         print()
         print("Penalties:")
         for i, var in enumerate(obj_bool_vars):

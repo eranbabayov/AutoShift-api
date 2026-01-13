@@ -2,6 +2,7 @@ from typing import List
 
 from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
+from starlette.middleware.cors import CORSMiddleware
 
 from database.core import (
     get_db,
@@ -18,9 +19,9 @@ from database.core import (
     add_shift_constraint,
     add_optional_employee_constraint,
     add_actual_employee_constraint,
-    add_shift_request, add_weekly_cover_demand, run_scheduler_for_company
+    add_shift_request, add_weekly_cover_demand, run_scheduler_for_company, login_request
 )
-from exception import NotFoundException, DatabaseException, FailedToCreateNewRole, AlreadyExists
+from exception import NotFoundException, DatabaseException, FailedToCreateNewRole, AlreadyExists, InvalidCredentials
 from logger import get_logger
 from schema import (
     EmployeeRead,
@@ -30,7 +31,7 @@ from schema import (
     ShiftConstraintSchema,
     OptionalEmployeeConstraintSchema,
     ActualEmployeeConstraintSchema,
-    AddShiftRequest, WeeklyCoverDemandSchema,
+    AddShiftRequest, WeeklyCoverDemandSchema, LoginRequest, RegistrationRequest,
 )
 
 app = FastAPI(
@@ -40,6 +41,14 @@ app = FastAPI(
     docs_url="/",   # Swagger UI at root
     redoc_url=None,
     openapi_url="/openapi.json",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8080"], # Your frontend origin
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 logger = get_logger("fast-api-logger")
@@ -96,6 +105,10 @@ def create_employee(employee: EmployeeCreate, db: Session = Depends(get_db)):
 @app.delete("/delete-employee/{employee_id}")
 def delete_employee(employee_id: int, db: Session = Depends(get_db)):
     try:
+        print(employee_id)
+        print(employee_id)
+        print(employee_id)
+        print(employee_id)
         delete_employee_using_id(db, employee_id)
         return {"status": "ok"}
     except (NotFoundException, DatabaseException) as e:
@@ -190,7 +203,7 @@ def create_weekly_cover_demand(demand: WeeklyCoverDemandSchema, db: Session = De
         return e
 
 
-@app.post("/run-scheduler/{company_id}")
+@app.get("/run-scheduler/{company_id}")
 def run_scheduler(company_id: int, db: Session = Depends(get_db)):
     try:
         schedule = run_scheduler_for_company(db, company_id)
@@ -198,3 +211,21 @@ def run_scheduler(company_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         logger.exception(f"Failed to run scheduler: {e}")
         raise DatabaseException(detail=str(e))
+
+
+@app.post("/login")
+def login(credentials: LoginRequest, db: Session = Depends(get_db)):
+    # Query MySQL users table
+    user = login_request(db, credentials)
+    if not user:
+        raise InvalidCredentials()
+    print("@@@@@@@@@@@@@@@@@@@@")
+    print(user)
+    return {"email": user.email, "companyId": user.company_id}
+
+
+@app.post("/register-request")
+def register_request(data: RegistrationRequest):
+    # Send email with registration details using Resend or SMTP
+    # Example: send email to your admin email with data.name, data.email, etc.
+    return {"status": "success"}
