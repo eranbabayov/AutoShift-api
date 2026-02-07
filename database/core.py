@@ -1,7 +1,7 @@
 import os
-from typing import List, Any
+from typing import List, Any, Dict
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, insert
 from sqlalchemy.orm import sessionmaker, Session
 from ortools.sat.python import cp_model
 from datetime import date, timedelta
@@ -16,7 +16,7 @@ from database.models import (
     ShiftConstraint,
     OptionalEmployeeConstraint,
     ActualEmployeeConstraint,
-    ShiftRequest, WeeklyCoverDemands, PenalizedTransitions, User,
+    ShiftRequest, WeeklyCoverDemands, PenalizedTransitions, User, ScheduleRun, ScheduledShift,
 )
 from exception import NotFoundException, DatabaseException, FailedToCreateNewRole, AlreadyExists
 from logger import get_logger
@@ -30,6 +30,7 @@ from schema import (
     OptionalEmployeeConstraintSchema,
     ActualEmployeeConstraintSchema,
     AddShiftRequest, WeeklyCoverDemandSchema, LoginRequest,
+    ScheduledShiftRead,
 )
 
 load_dotenv()
@@ -96,7 +97,6 @@ def add_employee(db: Session, employee: EmployeeCreate) -> Employee:
             raise NotFoundException(detail=f"Company id {employee.company_id} not found")
         if not db.query(Role).filter_by(id=employee.role_id).first():
             raise NotFoundException(detail=f"Role id {employee.role_id} not found")
-
         db_employee = Employee(**employee.model_dump())
         db.add(db_employee)
         db.commit()
@@ -107,6 +107,106 @@ def add_employee(db: Session, employee: EmployeeCreate) -> Employee:
     except Exception as e:
         logger.exception(f"Failed to add new employee. exception: {e}")
         raise DatabaseException()
+
+
+def add_schedule_run(db: Session, company_id, schedule_res: dict):
+    try:
+        period_start = schedule_res["period_start"]
+        period_end = schedule_res["period_end"]
+        assignments = schedule_res["assignments"]  # list[{"employee_id","shift_type_id","shift_date"}]
+
+        schedule_run = ScheduleRun(
+            company_id=company_id,
+            period_start=period_start,
+            period_end=period_end,
+            status="DRAFT",
+        )
+        db.add(schedule_run)
+        db.flush()  # assigns schedule_run.id without committing
+        # 3) Bulk insert scheduled_shift rows
+        rows = []
+        for a in assignments:
+            rows.append(
+                {
+                    "schedule_run_id": schedule_run.id,
+                    "company_id": company_id,
+                    "employee_id": a["employee_id"],
+                    "shift_type_id": a["shift_type_id"],
+                    "shift_date": a["shift_date"],
+                }
+            )
+
+        if rows:
+            db.execute(insert(ScheduledShift), rows)  # executemany-style bulk insert
+
+        # 4) Commit once
+        db.commit()
+
+        return {
+            "schedule_run_id": schedule_run.id,
+            "period_start": period_start,
+            "period_end": period_end,
+            "inserted": len(rows),
+            "schedule": schedule_res,  # optional: or omit to return less payload
+        }
+
+    except Exception as e:
+        db.rollback()
+        raise DatabaseException(detail=f"Failed to run scheduler and save: {e}")
+
+
+
+def get_scheduled_shifts(db: Session, company_id: int, start_date: date, end_date: date) -> Dict[int, List[dict]]:
+    """
+    Returns all scheduled shifts for a company within a given date range, grouped by schedule_run_id.
+    Joins with Employee and ShiftTypes to provide names.
+    Returns: { schedule_run_id: [ScheduledShiftRead dict, ...] }
+    """
+    try:
+        results = (
+            db.query(
+                ScheduledShift.id,
+                ScheduledShift.company_id,
+                ScheduledShift.schedule_run_id,
+                ScheduledShift.employee_id,
+                ScheduledShift.shift_type_id,
+                ScheduledShift.shift_date,
+                Employee.full_name.label("employee_name"),
+                ShiftTypes.type_name.label("shift_type_name")
+            )
+            .join(Employee, ScheduledShift.employee_id == Employee.id)
+            .join(ShiftTypes, ScheduledShift.shift_type_id == ShiftTypes.id)
+            .filter(
+                ScheduledShift.company_id == company_id,
+                ScheduledShift.shift_date >= start_date,
+                ScheduledShift.shift_date <= end_date
+            )
+            .all()
+        )
+
+        grouped_shifts = {}
+        for row in results:
+            run_id = row.schedule_run_id
+            if run_id not in grouped_shifts:
+                grouped_shifts[run_id] = []
+            
+            grouped_shifts[run_id].append({
+                "id": row.id,
+                "company_id": row.company_id,
+                "schedule_run_id": row.schedule_run_id,
+                "employee_id": row.employee_id,
+                "shift_type_id": row.shift_type_id,
+                "shift_date": row.shift_date,
+                "employee_name": row.employee_name,
+                "shift_type_name": row.shift_type_name
+            })
+            
+        return grouped_shifts
+
+    except Exception as e:
+        logger.exception(f"Failed to get scheduled shifts: {e}")
+        raise DatabaseException()
+
 
 
 def get_employee_using_id(db: Session, employee_id: int) -> Employee:
@@ -313,6 +413,7 @@ def add_shift_request(db: Session, shift: AddShiftRequest) -> ShiftRequest:
         logger.exception(f"Failed to add new shift request for employee {shift.employee_id}. exception: {e}")
         raise DatabaseException()
 
+
 def add_weekly_cover_demand(db: Session, demand: WeeklyCoverDemandSchema):
     try:
         new_demand = WeeklyCoverDemands(
@@ -346,9 +447,11 @@ def run_scheduler_for_company(db: Session, company_id: int) -> dict:
             .order_by(ShiftTypes.id)
             .all()
         )
+        shifts_data = [st.type_name for st in shift_types]
 
         #shifts_data = ["O"] + [st.type_name for st in shift_types] todo: set it from db later
-        shifts_data = ["O", "N"]
+        print("n_shiftn_shiftn_shiftn_shiftn_shiftn_shiftn_shiftn_shiftn_shiftn_shift")
+        # shifts_data = ["O", "N"]
 
         # Map DB shift_type.id → model shift index (1..num_shifts-1).
         #shift_id_to_idx = {st.id: idx + 1 for idx, st in enumerate(shift_types)}
@@ -385,6 +488,9 @@ def run_scheduler_for_company(db: Session, company_id: int) -> dict:
 
         # 4. Build a mapping from DB employee.id → model index 0..num_employees-1.
         emp_id_to_idx = {e["id"]: idx for idx, e in enumerate(employees_data)}
+        idx_to_emp_id = {idx: emp_id for emp_id, idx in emp_id_to_idx.items()}
+        n_shift = db.query(ShiftTypes).filter(ShiftTypes.type_name == "N").one()
+        idx_to_shift_type_id = {1: n_shift.id}  # 0 is Off and not stored
 
         # 5. Convert shift_requests from DB ids to model indices.
         #    - employee_id → e_idx (0..num_employees-1)
@@ -412,10 +518,27 @@ def run_scheduler_for_company(db: Session, company_id: int) -> dict:
             constraints=constraints_data,
         )
 
-        return schedule
+        # --- Convert solver assignments (idx) -> DB ids ---
+        db_assignments = []
+        for a in schedule["assignments"]:
+            e_idx = a["employee_idx"]
+            s_idx = a["shift_idx"]
+            db_assignments.append({
+                "employee_id": idx_to_emp_id[e_idx],
+                "shift_type_id": idx_to_shift_type_id[s_idx],
+                "shift_date": a["shift_date"],
+            })
+
+        return {
+            "period_start": schedule["period_start"],
+            "period_end": schedule["period_end"],
+            "assignments": db_assignments,
+            "stats": schedule.get("stats"),
+        }
 
     except Exception as e:
         raise DatabaseException(detail=f"Failed to run scheduler: {e}")
+
 
 def day_index(START_DATE, date_obj):
     return (date_obj - START_DATE).days
@@ -611,7 +734,33 @@ def my_scheduler(
 
     print()
     print(solver.response_stats())
-    return solver.response_stats()
+    # ... after solving
+    if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        assignments = []
+        for e in range(num_employees):
+            for d in range(num_days):
+                for s in range(1, num_shifts):  # 0 = Off, don't store
+                    if solver.boolean_value(work[e, s, d]):
+                        assignments.append({
+                            "employee_idx": e,
+                            "shift_idx": s,
+                            "shift_date": START_DATE + timedelta(days=d),
+                        })
+
+        return {
+            "period_start": START_DATE,
+            "period_end": START_DATE + timedelta(days=num_days - 1),
+            "assignments": assignments,
+            "stats": solver.response_stats(),  # keep it if you want
+        }
+
+    # if infeasible:
+    return {
+        "period_start": START_DATE,
+        "period_end": START_DATE + timedelta(days=num_days - 1),
+        "assignments": [],
+        "stats": solver.response_stats(),
+    }
 
 def demand_for_day_and_shift(
     weekday_demand_template: list[tuple[int, ...]],

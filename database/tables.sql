@@ -113,3 +113,30 @@ CREATE TABLE excess_cover_penalties (
 );
 CREATE INDEX idx_shift_request_emp_date ON shift_request(employee_id, shift_date);
 CREATE INDEX idx_fixed_assignments_emp_date ON fixed_assignments(employee_id, shift_date);
+
+CREATE TABLE schedule_run (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id INT NOT NULL,
+  period_start DATE NOT NULL,
+  period_end DATE NOT NULL,
+  status ENUM('DRAFT','PUBLISHED','CANCELLED') NOT NULL DEFAULT 'DRAFT',
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (company_id) REFERENCES company(id) ON DELETE CASCADE,
+);
+
+CREATE TABLE scheduled_shift (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  schedule_run_id BIGINT NOT NULL,
+  company_id INT NOT NULL,
+  employee_id INT NOT NULL,
+  shift_type_id INT NOT NULL,
+  shift_date DATE NOT NULL,
+
+  FOREIGN KEY (schedule_run_id) REFERENCES schedule_run(id) ON DELETE CASCADE,
+  FOREIGN KEY (company_id) REFERENCES company(id) ON DELETE CASCADE,
+  FOREIGN KEY (employee_id) REFERENCES employee(id) ON DELETE CASCADE,
+  FOREIGN KEY (shift_type_id) REFERENCES shift_types(id),
+
+  -- Optional: fast “get schedule for company/date range”:
+  KEY idx_company_date (company_id, shift_date)
+);

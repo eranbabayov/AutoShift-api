@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, Enum, Date
+from sqlalchemy import Column, Integer, String, ForeignKey, Enum, Date, BIGINT
 from sqlalchemy.orm import relationship, declarative_base
 import enum
 
@@ -127,3 +127,22 @@ class User(Base):
     email = Column(String, primary_key=True, unique=True, index=True)
     password = Column(String, nullable=False)
     company_id = Column(Integer, nullable=False)
+
+
+class ScheduleRun(Base):
+    __tablename__ = 'schedule_run'
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, nullable=False)
+    period_start = Column(Date, nullable=False)
+    period_end = Column(Date, nullable=False)
+    status = Column(Enum("DRAFT", "PUBLISHED", "CANCELLED"), nullable=False)
+
+
+class ScheduledShift(Base):
+    __tablename__ = 'scheduled_shift'
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, nullable=False)
+    schedule_run_id = Column(BIGINT, nullable=False)
+    employee_id = Column(Integer, nullable=False)
+    shift_type_id = Column(Integer, nullable=False)
+    shift_date = Column(Date, nullable=False)

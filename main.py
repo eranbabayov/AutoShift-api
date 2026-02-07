@@ -1,4 +1,5 @@
-from typing import List
+from typing import List, Dict
+from datetime import date
 
 from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
@@ -19,7 +20,8 @@ from database.core import (
     add_shift_constraint,
     add_optional_employee_constraint,
     add_actual_employee_constraint,
-    add_shift_request, add_weekly_cover_demand, run_scheduler_for_company, login_request
+    add_shift_request, add_weekly_cover_demand, run_scheduler_for_company, login_request, add_schedule_run,
+    get_scheduled_shifts
 )
 from exception import NotFoundException, DatabaseException, FailedToCreateNewRole, AlreadyExists, InvalidCredentials
 from logger import get_logger
@@ -32,6 +34,7 @@ from schema import (
     OptionalEmployeeConstraintSchema,
     ActualEmployeeConstraintSchema,
     AddShiftRequest, WeeklyCoverDemandSchema, LoginRequest, RegistrationRequest,
+    ScheduledShiftRead,
 )
 
 app = FastAPI(
@@ -105,10 +108,6 @@ def create_employee(employee: EmployeeCreate, db: Session = Depends(get_db)):
 @app.delete("/delete-employee/{employee_id}")
 def delete_employee(employee_id: int, db: Session = Depends(get_db)):
     try:
-        print(employee_id)
-        print(employee_id)
-        print(employee_id)
-        print(employee_id)
         delete_employee_using_id(db, employee_id)
         return {"status": "ok"}
     except (NotFoundException, DatabaseException) as e:
@@ -206,11 +205,27 @@ def create_weekly_cover_demand(demand: WeeklyCoverDemandSchema, db: Session = De
 @app.get("/run-scheduler/{company_id}")
 def run_scheduler(company_id: int, db: Session = Depends(get_db)):
     try:
-        schedule = run_scheduler_for_company(db, company_id)
-        return {"schedule": schedule}
+        schedule_res = run_scheduler_for_company(db, company_id)
+        res = add_schedule_run(db, company_id, schedule_res)
+
+        return {"schedule": res}
     except Exception as e:
         logger.exception(f"Failed to run scheduler: {e}")
         raise DatabaseException(detail=str(e))
+
+
+@app.get("/get-scheduled-shifts/{company_id}", response_model=Dict[int, List[ScheduledShiftRead]])
+def get_scheduled_shifts_endpoint(
+    company_id: int,
+    start_date: date,
+    end_date: date,
+    db: Session = Depends(get_db)
+):
+    try:
+        return get_scheduled_shifts(db, company_id, start_date, end_date)
+    except DatabaseException as e:
+        return e
+
 
 
 @app.post("/login")
@@ -219,8 +234,6 @@ def login(credentials: LoginRequest, db: Session = Depends(get_db)):
     user = login_request(db, credentials)
     if not user:
         raise InvalidCredentials()
-    print("@@@@@@@@@@@@@@@@@@@@")
-    print(user)
     return {"email": user.email, "companyId": user.company_id}
 
 

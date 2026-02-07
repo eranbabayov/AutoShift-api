@@ -72,3 +72,13 @@ class RegistrationRequest(BaseModel):
     phone: str
     companyName: str
     numberOfEmployees: str
+
+
+class ScheduledShiftRead(BaseModel):
+    id: int
+    company_id: int
+    schedule_run_id: int
+    employee_id: int
+    shift_type_id: int
+    shift_date: date
+

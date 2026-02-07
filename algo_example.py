@@ -401,7 +401,6 @@ def solve_shift_scheduling(params: str, output_proto: str):
     )
 
     if output_proto:
-        print(f"Writing proto to {output_proto}")
         with open(output_proto, "w") as text_file:
             text_file.write(str(model))
 
