@@ -21,7 +21,7 @@ from database.core import (
     add_optional_employee_constraint,
     add_actual_employee_constraint,
     add_shift_request, add_weekly_cover_demand, run_scheduler_for_company, login_request, add_schedule_run,
-    get_scheduled_shifts
+    get_scheduled_shifts, publish_schedule_run
 )
 from exception import NotFoundException, DatabaseException, FailedToCreateNewRole, AlreadyExists, InvalidCredentials
 from logger import get_logger
@@ -34,7 +34,7 @@ from schema import (
     OptionalEmployeeConstraintSchema,
     ActualEmployeeConstraintSchema,
     AddShiftRequest, WeeklyCoverDemandSchema, LoginRequest, RegistrationRequest,
-    ScheduledShiftRead,
+    ScheduledShiftRead, ScheduleRunGroupedRead,
 )
 
 app = FastAPI(
@@ -214,16 +214,20 @@ def run_scheduler(company_id: int, db: Session = Depends(get_db)):
         raise DatabaseException(detail=str(e))
 
 
-@app.get("/get-scheduled-shifts/{company_id}", response_model=Dict[int, List[ScheduledShiftRead]])
+@app.get("/get-scheduled-shifts/{company_id}", response_model=Dict[int, ScheduleRunGroupedRead])
 def get_scheduled_shifts_endpoint(
     company_id: int,
     start_date: date,
     end_date: date,
     db: Session = Depends(get_db)
 ):
+    return get_scheduled_shifts(db, company_id, start_date, end_date)
+
+@app.post("/schedule-run/{schedule_run_id}/publish")
+def publish_schedule_run_endpoint(schedule_run_id: int, db: Session = Depends(get_db)):
     try:
-        return get_scheduled_shifts(db, company_id, start_date, end_date)
-    except DatabaseException as e:
+        return publish_schedule_run(db, schedule_run_id)
+    except (NotFoundException, DatabaseException) as e:
         return e
 
 

@@ -156,12 +156,7 @@ def add_schedule_run(db: Session, company_id, schedule_res: dict):
 
 
 
-def get_scheduled_shifts(db: Session, company_id: int, start_date: date, end_date: date) -> Dict[int, List[dict]]:
-    """
-    Returns all scheduled shifts for a company within a given date range, grouped by schedule_run_id.
-    Joins with Employee and ShiftTypes to provide names.
-    Returns: { schedule_run_id: [ScheduledShiftRead dict, ...] }
-    """
+def get_scheduled_shifts(db: Session, company_id: int, start_date: date, end_date: date):
     try:
         results = (
             db.query(
@@ -172,25 +167,38 @@ def get_scheduled_shifts(db: Session, company_id: int, start_date: date, end_dat
                 ScheduledShift.shift_type_id,
                 ScheduledShift.shift_date,
                 Employee.full_name.label("employee_name"),
-                ShiftTypes.type_name.label("shift_type_name")
+                ShiftTypes.type_name.label("shift_type_name"),
+                ScheduleRun.status.label("schedule_status"),
+                ScheduleRun.period_start.label("period_start"),
+                ScheduleRun.period_end.label("period_end"),
             )
             .join(Employee, ScheduledShift.employee_id == Employee.id)
             .join(ShiftTypes, ScheduledShift.shift_type_id == ShiftTypes.id)
+            .join(ScheduleRun, ScheduledShift.schedule_run_id == ScheduleRun.id)
             .filter(
                 ScheduledShift.company_id == company_id,
                 ScheduledShift.shift_date >= start_date,
                 ScheduledShift.shift_date <= end_date
             )
+            .order_by(ScheduledShift.schedule_run_id, ScheduledShift.shift_date)
             .all()
         )
 
         grouped_shifts = {}
+
         for row in results:
             run_id = row.schedule_run_id
+
             if run_id not in grouped_shifts:
-                grouped_shifts[run_id] = []
-            
-            grouped_shifts[run_id].append({
+                grouped_shifts[run_id] = {
+                    "schedule_run_id": run_id,
+                    "status": row.schedule_status,
+                    "period_start": row.period_start,
+                    "period_end": row.period_end,
+                    "shifts": []
+                }
+
+            grouped_shifts[run_id]["shifts"].append({
                 "id": row.id,
                 "company_id": row.company_id,
                 "schedule_run_id": row.schedule_run_id,
@@ -200,13 +208,12 @@ def get_scheduled_shifts(db: Session, company_id: int, start_date: date, end_dat
                 "employee_name": row.employee_name,
                 "shift_type_name": row.shift_type_name
             })
-            
+
         return grouped_shifts
 
     except Exception as e:
         logger.exception(f"Failed to get scheduled shifts: {e}")
-        raise DatabaseException()
-
+        raise DatabaseException(detail="Failed to get scheduled shifts")
 
 
 def get_employee_using_id(db: Session, employee_id: int) -> Employee:
@@ -221,6 +228,48 @@ def get_employee_using_id(db: Session, employee_id: int) -> Employee:
         logger.exception(f"Failed to search employee. exception: {e}")
         raise DatabaseException()
 
+def publish_schedule_run(db: Session, schedule_run_id: int) -> Dict[str, Any]:
+    try:
+        selected_run = (
+            db.query(ScheduleRun)
+            .filter(ScheduleRun.id == schedule_run_id)
+            .first()
+        )
+
+        if not selected_run:
+            raise NotFoundException(detail=f"Schedule run id {schedule_run_id} not found")
+
+        db.query(ScheduleRun).filter(
+            ScheduleRun.company_id == selected_run.company_id,
+            ScheduleRun.period_start == selected_run.period_start,
+            ScheduleRun.period_end == selected_run.period_end,
+            ScheduleRun.id != selected_run.id,
+            ScheduleRun.status == "PUBLISHED",
+        ).update(
+            {"status": "CANCELLED"},
+            synchronize_session=False
+        )
+
+        selected_run.status = "PUBLISHED"
+
+        db.commit()
+        db.refresh(selected_run)
+
+        return {
+            "message": "Schedule published successfully",
+            "schedule_run_id": selected_run.id,
+            "company_id": selected_run.company_id,
+            "period_start": selected_run.period_start,
+            "period_end": selected_run.period_end,
+            "status": selected_run.status,
+        }
+
+    except NotFoundException:
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.exception(f"Failed to publish schedule run {schedule_run_id}: {e}")
+        raise DatabaseException(detail=f"Failed to publish schedule run: {e}")
 
 def delete_employee_using_id(db: Session, employee_id: int) -> None:
     try:

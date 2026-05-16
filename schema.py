@@ -81,4 +81,12 @@ class ScheduledShiftRead(BaseModel):
     employee_id: int
     shift_type_id: int
     shift_date: date
+    employee_name: str
+    shift_type_name: str
 
+class ScheduleRunGroupedRead(BaseModel):
+    schedule_run_id: int
+    status: str
+    period_start: date
+    period_end: date
+    shifts: list[ScheduledShiftRead]
