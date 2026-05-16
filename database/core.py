@@ -167,6 +167,7 @@ def get_scheduled_shifts(db: Session, company_id: int, start_date: date, end_dat
                 ScheduledShift.shift_type_id,
                 ScheduledShift.shift_date,
                 Employee.full_name.label("employee_name"),
+                Employee.role_id.label("employee_role_id"),
                 ShiftTypes.type_name.label("shift_type_name"),
                 ScheduleRun.status.label("schedule_status"),
                 ScheduleRun.period_start.label("period_start"),
@@ -206,9 +207,10 @@ def get_scheduled_shifts(db: Session, company_id: int, start_date: date, end_dat
                 "shift_type_id": row.shift_type_id,
                 "shift_date": row.shift_date,
                 "employee_name": row.employee_name,
-                "shift_type_name": row.shift_type_name
+                "shift_type_name": row.shift_type_name,
+                "employee_role_id": row.employee_role_id,
             })
-
+        print(grouped_shifts)
         return grouped_shifts
 
     except Exception as e:
@@ -438,11 +440,9 @@ def login_request(db: Session, credentials: LoginRequest):
     ).first()
 
 
-
 # ---------------
 # Shift requests
 # ---------------
-
 def add_shift_request(db: Session, shift: AddShiftRequest) -> ShiftRequest:
     try:
         # Validate FKs
@@ -478,7 +478,7 @@ def add_weekly_cover_demand(db: Session, demand: WeeklyCoverDemandSchema):
         logger.exception(f"Failed to add weekly cover demand: {e}")
         raise DatabaseException()
 
-def run_scheduler_for_company(db: Session, company_id: int) -> dict:
+def run_scheduler_for_company(db: Session, company_id: int, year: int, month: int) -> dict:
     """
     Loads all data for a specific company and runs the scheduler.
     """
@@ -556,6 +556,7 @@ def run_scheduler_for_company(db: Session, company_id: int) -> dict:
             e_idx = emp_id_to_idx[emp_id]
             s_idx = shift_id_to_idx[shift_type_id]
             indexed_shift_requests.append((e_idx, s_idx, shift_date, weight))
+        print("indexed_shift_requests:", indexed_shift_requests)
 
         # 6. Call the scheduling algorithm with indices, not raw DB ids.
         schedule = my_scheduler(
@@ -565,6 +566,8 @@ def run_scheduler_for_company(db: Session, company_id: int) -> dict:
             weekly_demands=weekly_demands_data,
             penalties=penalties_data,
             constraints=constraints_data,
+            year=year,
+            month=month,
         )
 
         # --- Convert solver assignments (idx) -> DB ids ---
@@ -594,11 +597,13 @@ def day_index(START_DATE, date_obj):
 
 def my_scheduler(
     employees: list,
-    shift_requests: list,  # (employee_index, shift_index, date, weight)
-    shifts: list,  # ["O", "Morning", "Night", ...]
+    shift_requests: list,
+    shifts: list,
     weekly_demands: list,
     penalties: list,
     constraints: list,
+    year: int,
+    month: int,
 ) -> dict:
     """
     Scheduler stub using OR-Tools CP-SAT.
@@ -612,10 +617,10 @@ def my_scheduler(
     num_shifts = len(shifts)
 
     # num_employees = 11
-    YEAR = 2025
-    MONTH = 11
-    START_DATE = date(YEAR, MONTH, 1)
-    HORIZON_DAYS = calendar.monthrange(YEAR, MONTH)[1]
+    START_DATE = date(year, month, 1)
+    HORIZON_DAYS = calendar.monthrange(year, month)[1]
+    print(f"START DATE: {START_DATE}")
+    print(f"HORIZON_DAYS: {HORIZON_DAYS}")
     num_days = HORIZON_DAYS
     start_sat_index = sat_index_from_pyweekday(START_DATE.weekday())
 
@@ -689,6 +694,8 @@ def my_scheduler(
 
     # For every employee and day, all working shifts (s > 0) that are not in
     # allowed_work are forced to 0, so the solver can only use Off or allowed shifts.
+    print("allowed_work:", sorted(allowed_work))
+
     for e in range(num_employees):
         for d in range(num_days):
             for s in range(1, num_shifts):  # working shifts only
@@ -1021,3 +1028,53 @@ def solve_shift_scheduling_from_data(
                         break
 
     return result_schedule
+
+def reassign_scheduled_shift(db: Session, scheduled_shift_id: int, new_employee_id: int):
+    try:
+        scheduled_shift = (
+            db.query(ScheduledShift)
+            .filter(ScheduledShift.id == scheduled_shift_id)
+            .first()
+        )
+        if not scheduled_shift:
+            raise NotFoundException(detail=f"Scheduled shift id {scheduled_shift_id} not found")
+
+        current_employee = (
+            db.query(Employee)
+            .filter(Employee.id == scheduled_shift.employee_id)
+            .first()
+        )
+        if not current_employee:
+            raise NotFoundException(detail=f"Current employee id {scheduled_shift.employee_id} not found")
+
+        new_employee = (
+            db.query(Employee)
+            .filter(Employee.id == new_employee_id)
+            .first()
+        )
+        if not new_employee:
+            raise NotFoundException(detail=f"New employee id {new_employee_id} not found")
+
+        if new_employee.company_id != scheduled_shift.company_id:
+            raise DatabaseException(detail="New employee does not belong to the same company")
+
+        if new_employee.role_id != current_employee.role_id:
+            raise DatabaseException(detail="New employee must have the same role as the current employee")
+
+        scheduled_shift.employee_id = new_employee_id
+        db.commit()
+        db.refresh(scheduled_shift)
+
+        return {
+            "message": "Scheduled shift reassigned successfully",
+            "scheduled_shift_id": scheduled_shift.id,
+            "employee_id": scheduled_shift.employee_id,
+        }
+
+    except (NotFoundException, DatabaseException):
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        logger.exception(f"Failed to reassign scheduled shift {scheduled_shift_id}: {e}")
+        raise DatabaseException(detail=f"Failed to reassign scheduled shift: {e}")

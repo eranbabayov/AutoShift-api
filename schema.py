@@ -13,6 +13,7 @@ class WeeklyCoverDemandSchema(BaseModel):
     shift_type_id: int
     demand: int
 
+
 class AddShiftRequest(BaseModel):
     employee_id: int
     shift_type_id: int
@@ -83,6 +84,8 @@ class ScheduledShiftRead(BaseModel):
     shift_date: date
     employee_name: str
     shift_type_name: str
+    employee_role_id: int
+
 
 class ScheduleRunGroupedRead(BaseModel):
     schedule_run_id: int
@@ -90,3 +93,7 @@ class ScheduleRunGroupedRead(BaseModel):
     period_start: date
     period_end: date
     shifts: list[ScheduledShiftRead]
+
+
+class ReassignScheduledShiftRequest(BaseModel):
+    new_employee_id: int

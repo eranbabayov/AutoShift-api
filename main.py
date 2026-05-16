@@ -4,6 +4,7 @@ from datetime import date
 from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
 from starlette.middleware.cors import CORSMiddleware
+from fastapi import Query
 
 from database.core import (
     get_db,
@@ -21,7 +22,7 @@ from database.core import (
     add_optional_employee_constraint,
     add_actual_employee_constraint,
     add_shift_request, add_weekly_cover_demand, run_scheduler_for_company, login_request, add_schedule_run,
-    get_scheduled_shifts, publish_schedule_run
+    get_scheduled_shifts, publish_schedule_run, reassign_scheduled_shift
 )
 from exception import NotFoundException, DatabaseException, FailedToCreateNewRole, AlreadyExists, InvalidCredentials
 from logger import get_logger
@@ -34,7 +35,7 @@ from schema import (
     OptionalEmployeeConstraintSchema,
     ActualEmployeeConstraintSchema,
     AddShiftRequest, WeeklyCoverDemandSchema, LoginRequest, RegistrationRequest,
-    ScheduledShiftRead, ScheduleRunGroupedRead,
+    ScheduledShiftRead, ScheduleRunGroupedRead, ReassignScheduledShiftRequest,
 )
 
 app = FastAPI(
@@ -189,6 +190,7 @@ def add_new_actual_employee_constraint(employee_constraint: ActualEmployeeConstr
 @app.post("/add-shift-request/")
 def create_shift_request(shift: AddShiftRequest, db: Session = Depends(get_db)):
     try:
+        print(shift)
         return add_shift_request(db, shift)
     except (DatabaseException, NotFoundException) as e:
         return e
@@ -203,9 +205,14 @@ def create_weekly_cover_demand(demand: WeeklyCoverDemandSchema, db: Session = De
 
 
 @app.get("/run-scheduler/{company_id}")
-def run_scheduler(company_id: int, db: Session = Depends(get_db)):
+def run_scheduler(
+    company_id: int,
+    year: int = Query(..., ge=2000, le=2100),
+    month: int = Query(..., ge=1, le=12),
+    db: Session = Depends(get_db)
+):
     try:
-        schedule_res = run_scheduler_for_company(db, company_id)
+        schedule_res = run_scheduler_for_company(db, company_id, year, month)
         res = add_schedule_run(db, company_id, schedule_res)
 
         return {"schedule": res}
@@ -222,6 +229,7 @@ def get_scheduled_shifts_endpoint(
     db: Session = Depends(get_db)
 ):
     return get_scheduled_shifts(db, company_id, start_date, end_date)
+
 
 @app.post("/schedule-run/{schedule_run_id}/publish")
 def publish_schedule_run_endpoint(schedule_run_id: int, db: Session = Depends(get_db)):
@@ -246,3 +254,14 @@ def register_request(data: RegistrationRequest):
     # Send email with registration details using Resend or SMTP
     # Example: send email to your admin email with data.name, data.email, etc.
     return {"status": "success"}
+
+@app.put("/scheduled-shift/{scheduled_shift_id}/reassign")
+def reassign_scheduled_shift_endpoint(
+    scheduled_shift_id: int,
+    payload: ReassignScheduledShiftRequest,
+    db: Session = Depends(get_db)
+):
+    try:
+        return reassign_scheduled_shift(db, scheduled_shift_id, payload.new_employee_id)
+    except (NotFoundException, DatabaseException) as e:
+        return e
